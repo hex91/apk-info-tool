@@ -1,0 +1,50 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 用于发布 Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install build deps
+        run: python -m pip install --upgrade pip pyinstaller pillow
+
+      - name: Build EXE
+        run: pyinstaller apk_info_aapt.spec --noconfirm --clean
+
+      - name: Verify artifact
+        run: |
+          if (-not (Test-Path dist/apk_info_aapt.exe)) { throw "EXE 未生成" }
+          Get-Item dist/apk_info_aapt.exe | Select-Object Name, Length
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk_info_aapt
+          path: dist/apk_info_aapt.exe
+          if-no-files-found: error
+
+      - name: Publish Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/apk_info_aapt.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

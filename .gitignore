@@ -1,0 +1,17 @@
+# 构建产物
+/build/
+/dist/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.spec.bak
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# 注意：aapt.exe 是构建必需的二进制，需随仓库提交，不要忽略。
+# 注意：apk_info_aapt.spec 是构建配置，需随仓库提交。
