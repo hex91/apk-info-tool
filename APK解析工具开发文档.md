@@ -1,7 +1,7 @@
 # APK 信息解析工具（aapt 版 GUI）开发文档
 
-> 版本：v11（截至 2026-11-20，对应 GitHub Release `v1.1.0`；仓库根目录可移植 spec 构建产出 `apk_info_aapt.exe`）
-> 源码：`apk_tools/apk_info_aapt_gui.py`
+> 版本：v12（截至 2026-11-20，对应 GitHub Release `v1.2.0`；仓库根目录可移植 spec 构建产出 `apk_info_aapt.exe` 与 `apk_info_cli.exe`）
+> 源码：`apk_tools/apk_info_aapt_gui.py`（GUI）、`apk_info_cli.py`（CLI，复用前者解析核心）
 > 作者：han（WorkBuddy 协助开发）
 
 ---
@@ -693,7 +693,95 @@ PyInstaller --onefile --windowed --name apk_info_aapt
 
 ---
 
-## 八、已知局限与后续可改进
+## 八、CLI 命令行版（供其它程序调用）
+
+### 8.1 定位与设计
+
+`apk_info_cli.py` / `apk_info_cli.exe` 是同一解析核心的命令行入口，供脚本或其它程序集成。
+
+- **复用而非重写**：CLI 直接 `import apk_info_aapt_gui as core`，调用
+  `find_aapt / compute_file_info / run_aapt / parse_signatures / _extract_apk_icon /
+  sdk_name / _clean_label` 等函数。GUI 源码零改动，两者解析结果始终一致，无重复维护。
+- **import 安全性**：GUI 模块末尾有 `if __name__ == "__main__"` 保护，import 时不会启动窗口。
+- **流分离**：stdout 只输出数据，stderr 只输出提示/错误；程序可放心解析 stdout。
+- **编码**：启动时强制 `sys.stdout/stderr` 为 UTF-8，中文应用名在管道/重定向下不乱码。
+- **打包**：`apk_info_cli.spec` 以 console 模式构建（保证 stdout 可用），内嵌 aapt，
+  独立运行无需 Python / SDK。
+
+### 8.2 用法
+
+```bat
+apk_info_cli.exe app.apk                                   :: 默认每行「字段=值」
+apk_info_cli.exe --fields package,app_label,version_name app.apk
+apk_info_cli.exe --json app.apk                            :: 结构化 JSON（推荐程序解析）
+apk_info_cli.exe --tsv --out result.tsv a.apk b.apk         :: TSV 写入文件 + 批量
+apk_info_cli.exe --list-fields                             :: 列出全部字段
+```
+
+参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `apks...` | 一个或多个 APK 路径（位置参数） |
+| `--json` | 输出 JSON（单 APK 为对象，多 APK 为数组；列表字段保留为数组） |
+| `--tsv` | 输出两列 TSV：`字段<TAB>值` |
+| `--fields LIST` | 只输出指定字段，逗号分隔 |
+| `--list-fields` | 打印全部字段名与中文说明后退出 |
+| `--aapt PATH` | 指定 aapt.exe（默认自动查找 / 用 exe 内嵌的） |
+| `--out FILE` | 输出写入文件（UTF-8），stdout 保持为空 |
+| `--no-icon` / `--no-sign` | 跳过图标提取 / 签名解析（批量提速） |
+| `--quiet` | 不向 stderr 输出非致命提示 |
+
+### 8.3 默认输出字段（顺序即输出顺序）
+
+| 字段 | 含义 | 字段 | 含义 |
+| --- | --- | --- | --- |
+| `file_path` / `file_name` | 路径 / 文件名 | `package` / `app_label` | 包名 / 应用名 |
+| `file_md5` | 文件 MD5 | `version_name` / `version_code` | 版本名 / 版本码 |
+| `file_size_bytes` / `file_size_mb` | 大小 | `min_sdk` / `target_sdk` | 最低 / 目标 SDK 数值 |
+| `min_sdk_name` / `target_sdk_name` | 系统可读名 | `compile_sdk` | 编译 SDK |
+| `launchable` | 入口 Activity | `install_location` | 安装位置 |
+| `native_code` | ABI（逗号连接） | `supports_screens` | 支持屏幕（逗号连接） |
+| `icon_status` | ok/guess/encrypted/missing | `icon_path` / `icon_format` / `icon_size` | 图标路径 / 格式 / 尺寸 |
+| `icon_md5` | 图标 MD5 | `sign_schemes` | 签名方案（逗号连接） |
+| `sign_count` | 证书数 | `permission_count` / `permissions` | 权限数 / 权限列表 |
+| `feature_count` / `features` | 特性数 / 列表 | `certs` | 证书明细（kv/tsv 下展开为 `certN_*` 行） |
+
+多值时：`kv` / `tsv` 模式把列表用逗号连接成单行，证书展开为 `cert1_subject=`、`cert1_sha256=` 等；
+`--json` 模式保留原生数组/对象，最适合程序消费。
+
+### 8.4 退出码与错误约定
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 APK 解析成功 |
+| `1` | 部分 APK 失败（成功项照常输出，失败原因见 stderr） |
+| `2` | 参数错误 / 文件不存在 / 全部失败 / 无可用 aapt |
+
+典型调用（Python 子进程示例）：
+
+```python
+import subprocess, json
+r = subprocess.run(["apk_info_cli.exe", "--json", "app.apk"],
+                   capture_output=True, text=True, encoding="utf-8")
+if r.returncode == 0:
+    info = json.loads(r.stdout)
+    print(info["package"], info["app_label"])
+else:
+    print("解析失败:", r.stderr)
+```
+
+### 8.5 验证记录（v1.2.0）
+
+- 普通样本：全字段输出正常，包名/应用名/版本/图标MD5/签名/权限齐全。
+- 加固样本（central directory 损坏）：自动从本地文件头重建后解析，提示走 stderr。
+- 填充炸弹样本 `ag209.apk`（109MB manifest）：约 7 秒完成，不卡死（复用 GUI 版修复）。
+- 批量 + 部分失败：成功项输出、失败原因进 stderr、退出码 `1`。
+- 打包 exe：内嵌 aapt、`--list-fields` 冒烟通过、中文应用名不乱码。
+
+---
+
+## 九、已知局限与后续可改进
 
 - **v4 签名**：当前只从签名块识别 v4 方案 ID，不校验 v4 依赖的 `.idsig` 文件。
 - **证书链**：目前只展示直接解析出的证书，未显式构建"证书链/是否被系统信任"关系。
@@ -704,4 +792,4 @@ PyInstaller --onefile --windowed --name apk_info_aapt
 
 ---
 
-*文档生成时间：2026-07-27 — 基于源码 `apk_info_aapt_gui.py`（v8）与开发记录整理。*
+*文档生成时间：2026-07-27；最近更新 2026-11-20（v12，新增 CLI 命令行版）— 基于源码 `apk_info_aapt_gui.py` 与 `apk_info_cli.py` 及开发记录整理。*
