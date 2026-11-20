@@ -510,17 +510,28 @@ def _decode_arsc_string(raw, p, utf8, gap):
 
 
 def _scan_next_known(raw, start, end):
-    """从 start 起扫描, 跳过损坏区, 找到下一个合法 chunk 的起始偏移。"""
+    """从 start 起扫描, 跳过损坏区, 找到下一个合法 chunk 的起始偏移。
+
+    防御"填充炸弹"manifest: 部分反分析样本在合法 AXML 之后塞入数十~上百 MB
+    的 0x20 空格填充(如 ag209.apk 的 manifest 解压后 109MB, 其中 99.9% 为空格)。
+    主循环读到填充区时 chunk size=0x20202020 会判定非法并进入本函数; 若逐字节
+    扫描整个填充区, 需数亿次 struct.unpack_from, Python 层循环将耗时数十秒到
+    数分钟, 直接冻结 GUI 主线程。故限制最大扫描窗口: 合法 chunk 通常紧跟损坏
+    区, 64KB 内足以重新同步; 超过则判定为尾部填充, 放弃扫描。"""
     p = start
-    while p + 8 <= end:
+    scanned = 0
+    max_scan = 65536  # 64KB 重同步窗口, 超限即视为填充垃圾
+    while p + 8 <= end and scanned < max_scan:
         t = struct.unpack_from("<H", raw, p)[0]
         if t in _AXML_KNOWN:
             return p
         s = struct.unpack_from("<I", raw, p + 4)[0]
         if s >= 8 and p + s <= end:
             p += s
+            scanned += s
         else:
             p += 1
+            scanned += 1
     return None
 
 
@@ -695,7 +706,13 @@ def parse_manifest_axml(raw):
         if stack:
             stack.pop()
 
-    while pos + 8 <= end:
+    # 迭代上限: 防止超大/畸形 manifest(如填充炸弹样本)在损坏区反复重同步导致
+    # 长时间占用 GUI 主线程。合法 manifest 的 chunk 数通常在数千以内, 50000 步
+    # 远超正常需求, 达到即终止(已解析到的信息保留)。
+    _steps = 0
+    _MAX_STEPS = 50000
+    while pos + 8 <= end and _steps < _MAX_STEPS:
+        _steps += 1
         t, h, s = struct.unpack_from("<HHI", raw, pos)
         if s < 8 or pos + s > end:
             nxt = _scan_next_known(raw, pos + 1, end)

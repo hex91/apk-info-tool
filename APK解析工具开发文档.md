@@ -1,6 +1,6 @@
 # APK 信息解析工具（aapt 版 GUI）开发文档
 
-> 版本：v10（截至 2026-07-27，对应 `apk_tools/dist_exe/apk_info_aapt_v10.exe`）
+> 版本：v11（截至 2026-11-20，对应 GitHub Release `v1.1.0`；仓库根目录可移植 spec 构建产出 `apk_info_aapt.exe`）
 > 源码：`apk_tools/apk_info_aapt_gui.py`
 > 作者：han（WorkBuddy 协助开发）
 
@@ -590,6 +590,39 @@ else:  # 兜底
 - `U-VIP.apk` → 包名 `com.crscg.cib1255.rcdezfj`、应用名 `U.VIP`、版本 `1.1.51`(code 12)、
   minSdk 14 / targetSdk 34 / compileSdk 34、入口 `com.speed.client.CCMainActivity`、25 项权限。
 - 回归：批量扫描 19 个样本 APK，包名解析 19/19 成功，0 失败；`hjsq.apk` 等 UTF-16 池样本应用名正常。
+
+---
+
+### 问题 11："填充炸弹"manifest 致 GUI 解析卡死（`ag209.apk`，v11）
+
+**现象**：拖入 `ag209.apk`（57MB）后 GUI 长时间无响应（卡死数分钟），无法得出结果。
+
+**定位（分阶段计时）**：`aapt dump badging` 本身仅 1s 且输出正常，
+  卡点在 `run_aapt()` 的容错兜底链路——`parse_manifest_axml()` 解析
+  `_read_zip_entry_raw()` 取出的 manifest 时超时（>60s）。
+
+**根因**：该样本是反分析构造的"填充炸弹"：
+- `AndroidManifest.xml` 压缩后仅 112KB，解压后达 **109MB**（压缩比约 973:1），
+  aapt 报错 `ResXMLTree_node data size 0x20202020 extends beyond resource end`。
+- 合法 AXML 结构仅在前 **68508 字节**（261 个 chunk：105 START_ELEM + 105 END_ELEM +
+  字符串池等，信息完整）；其后是 **109,051,922 字节的 0x20 空格填充**（占 99.9%）。
+- 填充区被当作 chunk 读出的 `size=0x20202020`(538MB) `> end`，主循环进入
+  `_scan_next_known()`。该函数从 `pos+1` 起**逐字节**扫描剩余 109MB，
+  每次做 2 次 `struct.unpack_from`——约 2 亿次 Python 层循环，耗时数十秒~数分钟，
+  且发生在 GUI 主线程，直接冻结窗口。
+
+**修复**：
+- `_scan_next_known()` 增加 `max_scan=65536`(64KB) 重同步窗口上限：合法 chunk 通常紧跟
+  损坏区，64KB 内足以重新同步；超限即判定为尾部填充垃圾，返回 None 让主循环终止。
+- `parse_manifest_axml()` 主循环增加迭代上限 `_MAX_STEPS=50000`：正常 manifest chunk 数
+  在数千以内，超限即终止并保留已解析信息，防止其他畸形构造反复重同步占用主线程。
+
+**验证**：
+- 完整 109MB manifest 解析：`>60s（卡死）→ 0.085s`，信息完整
+  （包名 `co.zh9feqyc1.jfg04z`、入口 `vip.zpiln9.nx9lxdale.MainActivity`、
+  版本 `6.3.383`、21 项权限；label 为资源引用 `@0x7f0f001e`，由 aapt 还原真实应用名）。
+- 全链路计时：compute_file_info 0.17s / run_aapt 1.01s / 图标提取 1.25s（提示 `encrypted`）/ 签名 0.13s。
+- 回归：普通样本的合法 chunk 均在 64KB 窗口与 50000 步内完成，行为不变。
 
 ---
 
